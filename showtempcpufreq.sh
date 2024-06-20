@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# version: 2023.9.5
+# version: 2024.6.6
 #添加硬盘信息的控制变量，如果你想不显示硬盘信息就设置为false
 #NVME硬盘
 sNVMEInfo=true
@@ -113,14 +113,16 @@ $res->{cpuFreq} = `
 	goverf=/sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 	maxf=/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq
 	minf=/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq
+	curf=/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq
 	
-	cat /proc/cpuinfo | grep -i  "cpu mhz"
 	echo -n 'gov:'
 	[ -f \$goverf ] && cat \$goverf || echo none
 	echo -n 'min:'
 	[ -f \$minf ] && cat \$minf || echo none
 	echo -n 'max:'
 	[ -f \$maxf ] && cat \$maxf || echo none
+	echo -n 'cur:'
+	[ -f \$curf ] && cat \$curf || echo none
 	echo -n 'pkgwatt:'
 	[ -e /usr/sbin/turbostat ] && turbostat --quiet --cpu package --show "PkgWatt" -S sleep 0.25 2>&1 | tail -n1 
 
@@ -137,11 +139,10 @@ cat > $contentforpvejs << 'EOF'
 		itemId: 'thermal',
 		colspan: 2,
 		printBar: false,
-		title: gettext('温度(°C)'),
+		title: gettext('温度'),
 		textField: 'thermalstate',
 		renderer:function(value){
-			//value进来的值是有换行符的
-			console.log(value)
+			// value进来的值是有换行符的
 			let b = value.trim().split(/\s+(?=^\w+-)/m).sort();
 			let c = b.map(function (v){
 				// 风扇转速数据，直接返回
@@ -159,15 +160,19 @@ cat > $contentforpvejs << 'EOF'
 					
 					if (/coretemp/i.test(name)) {
 						name = 'CPU';
-						temp = temp[0] + ( temp.length > 1 ? ' ( ' +   temp.slice(1).join(' | ') + ' )' : '');
+						temp = temp[0] + " °C";
+					} else if (/acpitz/i.test(name)) {
+						name = '主板';
+
+						let temp1 = [];
+						temp.forEach((tempOne) => temp1.push(tempOne + " °C"));
+
+						temp = temp1[0] + ( temp1.length > 1 ? ', ' + temp1.slice(1).join(', ') : '');
 					} else {
-						temp = temp[0];
+						return 'null'
 					}
 					
-					let crit = v.match(/(?<=\bcrit\b[^+]+\+)\d+/);
-					
-					
-					return name + ': ' + temp + ( crit? ` ,crit: ${crit[0]}` : '');
+					return name + ': ' + temp;
 					
 				} else {
 					return 'null'
@@ -175,17 +180,16 @@ cat > $contentforpvejs << 'EOF'
 				
 
 			});
-			console.log(c);
+			
 			// 排除null值的
 			c=c.filter( v => ! /^null$/.test(v) )
-			//console.log(c);
-			//排序，把cpu温度放最前
+			
+			// 排序，把cpu温度放最前
 			let cpuIdx = c.findIndex(v => /CPU/i.test(v) );
 			if (cpuIdx > 0) {
 				c.unshift(c.splice(cpuIdx, 1)[0]);
 			}
 			
-			console.log(c)
 			c = c.join(' | ');
 			return c;
 		 }
@@ -194,15 +198,9 @@ cat > $contentforpvejs << 'EOF'
 		  itemId: 'cpumhz',
 		  colspan: 2,
 		  printBar: false,
-		  title: gettext('CPU频率(GHz)'),
+		  title: gettext('CPU频率'),
 		  textField: 'cpuFreq',
 		  renderer:function(v){
-			//return v;
-			console.log(v);
-			let m = v.match(/(?<=^cpu[^\d]+)\d+/img);
-			let m2 = m.map( e => ( e / 1000 ).toFixed(1) );
-			m2 = m2.join(' | ');
-			
 			let gov = v.match(/(?<=^gov:).+/im)[0].toUpperCase();
 			
 			let min = (v.match(/(?<=^min:).+/im)[0]);
@@ -214,11 +212,16 @@ cat > $contentforpvejs << 'EOF'
 			if ( max !== 'none' ) {
 				max=(max/1000000).toFixed(1);
 			}
+
+			let cur = (v.match(/(?<=^cur:).+/im)[0])
+			if ( cur !== 'none' ) {
+				cur=(cur/1000000).toFixed(1);
+			}
 			
 			let watt= v.match(/(?<=^pkgwatt:)[\d.]+$/im);
-			watt = watt? " | 功耗: " + (watt[0]/1).toFixed(1) + 'W' : '';
+			watt = watt? " | 功耗: " + (watt[0]/1).toFixed(1) + ' W' : '';
 			
-			return `${m2} | MAX: ${max} | MIN: ${min}${watt} | 调速器: ${gov}`
+			return `当前: ${cur} GHz ( ${min} - ${max} GHz )${watt} | 策略: ${gov}`
 		 }
 	},
 EOF
@@ -244,23 +247,25 @@ EOF
 			  title: gettext('NVME${nvi}'),
 			  textField: 'nvme${nvi}',
 			  renderer:function(value){
-				//return value;
 				try{
-					let  v = JSON.parse(value);
-					//名字
+					let v = JSON.parse(value);
+					// 名字
 					let model = v.model_name;
 					if (! model) {
 						return '找不到硬盘，直通或已被卸载';
+					} else {
+						let modelStrs = model.trim().split(/\s+/);
+						model = modelStrs[0] + " " + modelStrs[modelStrs.length - 1];
 					}
 					// 温度
 					let temp = v.temperature?.current;
-					temp = ( temp !== undefined ) ? " | " + temp + '°C' : '' ;
+					temp = ( temp !== undefined ) ? " | " + temp + ' °C' : '' ;
 					
 					// 通电时间
 					let pot = v.power_on_time?.hours;
 					let poth = v.power_cycle_count;
 					
-					pot = ( pot !== undefined ) ? (" | 通电: " + pot + '时' + ( poth ? ',次: '+ poth : '' )) : '';
+					pot = ( pot !== undefined ) ? (" | " + pot + ' 时' + ( poth ? ', '+ poth + ' 次' : '' )) : '';
 					
 					// 读写
 					let log = v.nvme_smart_health_information_log;
@@ -269,17 +274,17 @@ EOF
 					if (log) {
 						let read = log.data_units_read;
 						let write = log.data_units_written;
-						read = read ? (log.data_units_read / 1956882).toFixed(1) + 'T' : '';
-						write = write ? (log.data_units_written / 1956882).toFixed(1) + 'T' : '';
+						read = read ? (log.data_units_read / 1956882).toFixed(1) + ' T' : '';
+						write = write ? (log.data_units_written / 1956882).toFixed(1) + ' T' : '';
 						if (read && write) {
-							rw = ' | R/W: ' + read + '/' + write;
+							rw = ' | R/W: ' + read + ' / ' + write;
 						}
 						let pu = log.percentage_used;
 						let me = log.media_errors;
 						if ( pu !== undefined ) {
 							health = ' | 健康: ' + ( 100 - pu ) + '%'
 							if ( me !== undefined ) {
-								health += ',0E: ' + me
+								health += ', 0E: ' + me
 							}
 						}
 					}
@@ -293,8 +298,8 @@ EOF
 					}
 					
 					
-					let t = model  + temp + health + pot + rw + smart;
-					//console.log(t);
+					let t = model + temp + pot + health + rw + smart;
+
 					return t;
 				}catch(e){
 					return '无法获得有效消息';
@@ -356,28 +361,27 @@ EOF
 			  title: gettext('${sdtype}'),
 			  textField: 'sd${sdi}',
 			  renderer:function(value){
-				//return value;
 				try{
-					let  v = JSON.parse(value);
-					console.log(v)
+					let v = JSON.parse(value);
+					
 					if (v.standy === true) {
 						return '休眠中'
 					}
 					
-					//名字
+					// 名字
 					let model = v.model_name;
 					if (! model) {
 						return '找不到硬盘，直通或已被卸载';
 					}
 					// 温度
 					let temp = v.temperature?.current;
-					temp = ( temp !== undefined ) ? " | 温度: " + temp + '°C' : '' ;
+					temp = ( temp !== undefined ) ? " | " + temp + ' °C' : '' ;
 					
 					// 通电时间
 					let pot = v.power_on_time?.hours;
 					let poth = v.power_cycle_count;
 					
-					pot = ( pot !== undefined ) ? (" | 通电: " + pot + '时' + ( poth ? ',次: '+ poth : '' )) : '';
+					pot = ( pot !== undefined ) ? (" | " + pot + ' 时' + ( poth ? ', '+ poth + ' 次' : '' )) : '';
 					
 					// smart状态
 					let smart = v.smart_status?.passed;
@@ -388,8 +392,8 @@ EOF
 					}
 					
 					
-					let t = model + temp  + pot + smart;
-					//console.log(t);
+					let t = model + temp + pot + smart;
+					
 					return t;
 				}catch(e){
 					return '无法获得有效消息';
@@ -443,7 +447,7 @@ if ! grep -q 'modbyshowtempfreq' $pvejs ;then
 	echo 修改页面高度
 	#统计加了几条
 	addRs=$(grep -c '\$res' $contentfornp)
-	addHei=$(( 28 * addRs))
+	addHei=$(( 28 * (addRs - 2)))
 	$dmode && echo "添加了$addRs条内容,增加高度为:${addHei}px"
 
 
